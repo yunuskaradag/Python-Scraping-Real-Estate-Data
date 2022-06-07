@@ -1,0 +1,2528 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Populating the interactive namespace from numpy and matplotlib\n"
+     ]
+    }
+   ],
+   "source": [
+    "import pyodbc\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import seaborn as sns\n",
+    "from IPython.display import display\n",
+    "%pylab inline\n",
+    "from tqdm import tqdm\n",
+    "\n",
+    "import sklearn as sk\n",
+    "import sklearn.tree as tree\n",
+    "from IPython.display import Image \n",
+    "import pydotplus\n",
+    "from sklearn.model_selection import train_test_split # Import train_test_split function\n",
+    "from sklearn.preprocessing import LabelEncoder\n",
+    "from sklearn.ensemble import RandomForestRegressor\n",
+    "# evaluate RFE for regression\n",
+    "from numpy import mean\n",
+    "from numpy import std\n",
+    "from sklearn.datasets import make_regression\n",
+    "from sklearn.model_selection import cross_val_score\n",
+    "from sklearn.model_selection import RepeatedKFold\n",
+    "from sklearn.feature_selection import RFE\n",
+    "from sklearn.tree import DecisionTreeRegressor\n",
+    "from sklearn.ensemble import RandomForestRegressor\n",
+    "from sklearn.ensemble import GradientBoostingRegressor\n",
+    "import xgboost as xgb\n",
+    "from xgboost import XGBRegressor\n",
+    "from sklearn.metrics import mean_absolute_error\n",
+    "\n",
+    "from sklearn.pipeline import Pipeline\n",
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "from sklearn.feature_selection import SelectKBest\n",
+    "from sklearn.feature_selection import chi2\n",
+    "from sklearn.model_selection import KFold\n",
+    "from pprint import pprint"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#aynı beslenen kolonları tekilleştirir:\n",
+    "def drop_duplicate_columns(train_x, dummy_columns_prefix='DMY_'):\n",
+    "    \"\"\"\n",
+    "\n",
+    "    :param train_x:\n",
+    "    :param test_x:\n",
+    "    :param dummy_columns_prefix:\n",
+    "    :return:\n",
+    "    \"\"\"\n",
+    "    desc = train_x[[col for col in train_x.columns if not col.startswith(dummy_columns_prefix)]] \\\n",
+    "        .describe()\n",
+    "    desc = desc.loc[['mean', 'std'], :]\n",
+    "    blacklist = []\n",
+    "    duplicated_feat = {}\n",
+    "    for i in range(0, len(desc.columns)):\n",
+    "        if i % 250 == 0:  # this helps me understand how the loop is going\n",
+    "            print(i)\n",
+    "\n",
+    "        col_1 = desc.columns[i]\n",
+    "        if col_1 in blacklist:\n",
+    "            continue\n",
+    "\n",
+    "        for col_2 in desc.columns[i + 1:]:\n",
+    "            if desc[col_1].equals(desc[col_2]):\n",
+    "                if col_1 not in duplicated_feat:\n",
+    "                    duplicated_feat[col_1] = []\n",
+    "                duplicated_feat[col_1].append(col_2)\n",
+    "\n",
+    "        blacklist = []\n",
+    "        for sublist in [x for x in duplicated_feat.values()]:\n",
+    "            for item in sublist:\n",
+    "                blacklist.append(item)\n",
+    "\n",
+    "    train_x.drop(blacklist, axis=1, inplace=True)\n",
+    "    #test_x.drop(blacklist, axis=1, inplace=True)\n",
+    "    return blacklist\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#değişkenler arasındaki korelasyona bakar, %80 ve üzerini eler, \n",
+    "#hangisinin eleneceği tek değişkenli random forest ile belirlenir importance'ı düşük olan elenir:\n",
+    "\n",
+    "def eliminate_group_correlation(X_train, Y_train, corrmat=None, threshold=0.5, seed=100): #%80 de baklılabilir\n",
+    "    \"\"\"\n",
+    "\n",
+    "    :param X_train:\n",
+    "    :param X_test:\n",
+    "    :param Y_train:\n",
+    "    :param target_column:\n",
+    "    :param corrmat:\n",
+    "    :param threshold:\n",
+    "    :return:\n",
+    "    \"\"\"\n",
+    "    if corrmat is None:\n",
+    "        corrmat = X_train.corr()\n",
+    "    corrmat = corrmat.abs().unstack()  # absolute value of corr coef\n",
+    "    corrmat = corrmat.sort_values(ascending=False)\n",
+    "    corrmat = corrmat[corrmat >= threshold]\n",
+    "    corrmat = corrmat[corrmat < 1]\n",
+    "    corrmat = pd.DataFrame(corrmat).reset_index()\n",
+    "    corrmat.columns = ['feature1', 'feature2', 'corr']\n",
+    "\n",
+    "    # find groups of correlated features\n",
+    "    grouped_feature_ls = []\n",
+    "    correlated_groups = []\n",
+    "\n",
+    "    for feature in corrmat.feature1.unique():\n",
+    "        if feature not in grouped_feature_ls:\n",
+    "            # find all features correlated to a single feature\n",
+    "            correlated_block = corrmat[corrmat.feature1 == feature]\n",
+    "            grouped_feature_ls = grouped_feature_ls + list(\n",
+    "                correlated_block.feature2.unique()) + [feature]\n",
+    "\n",
+    "            # append the block of features to the list\n",
+    "            correlated_groups.append(correlated_block)\n",
+    "\n",
+    "    count = 0\n",
+    "    drop_features = []\n",
+    "    for group in correlated_groups:\n",
+    "        count += 1\n",
+    "        features = list(group.feature1.unique()) + list(group.feature2.unique())\n",
+    "        rf = RandomForestRegressor(n_estimators=100, random_state=seed)\n",
+    "        rf.fit(X_train[features], Y_train)\n",
+    "        keep = features[rf.feature_importances_.argmax()]\n",
+    "        features.remove(keep)\n",
+    "        drop_features += features\n",
+    "        if count % 10 == 0:\n",
+    "            print(f'\\rFeature Collinearity Elimination Progress: {count} / {len(correlated_groups)}', end='')\n",
+    "    return drop_features"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#tek değerli değişkenleri eler:\n",
+    "\n",
+    "def drop_constant(train_x):\n",
+    "    \"\"\"\n",
+    "\n",
+    "    :param train_x:\n",
+    "    :return:\n",
+    "    \"\"\"\n",
+    "    numerical = train_x.select_dtypes(['int64', 'float64']).columns\n",
+    "    constant_numerical = [feat for feat in numerical if train_x[feat].std() == 0]\n",
+    "    train_x.drop(constant_numerical, axis=1, inplace=True)\n",
+    "    #test_x.drop(constant_numerical, axis=1, inplace=True)\n",
+    "\n",
+    "    categorical = train_x.select_dtypes(['O']).columns\n",
+    "    constant_categorical = [feat for feat in categorical if len(train_x[feat].unique()) == 1]\n",
+    "    train_x.drop(constant_categorical, axis=1, inplace=True)\n",
+    "    #test_x.drop(constant_categorical, axis=1, inplace=True)\n",
+    "    dropped_cache = constant_categorical + constant_numerical\n",
+    "    return dropped_cache"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#data okuma:\n",
+    "\n",
+    "conn = pyodbc.connect('Driver={SQL Server};'\n",
+    "                      'Server=DEVELOPMENT-01;'\n",
+    "                      'Database=Erc_Project;'\n",
+    "                      'Trusted_Connection=yes;')\n",
+    "\n",
+    "cursor = conn.cursor()\n",
+    "\n",
+    "data = pd.read_sql_query(('SELECT  * FROM [Erc_Project].[exp].[ticari_vars_target]'), conn)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>Features</th>\n",
+       "      <th>Unique Number</th>\n",
+       "      <th>Values</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>contactcode</td>\n",
+       "      <td>45502</td>\n",
+       "      <td>[38433022, 68510340, 9555221, 75038344, 795108...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>refdate</td>\n",
+       "      <td>35</td>\n",
+       "      <td>[2019-06-30, 2019-09-30, 2020-02-29, 2021-06-3...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>BusinessUnitCode</td>\n",
+       "      <td>5</td>\n",
+       "      <td>[22, 21, 20, 12, 29]</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>AssetManagementCode</td>\n",
+       "      <td>95</td>\n",
+       "      <td>[23, 5580, 718, 4246, 7205, 6482, 5643, 5688, ...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>ReachStatusCode</td>\n",
+       "      <td>5</td>\n",
+       "      <td>[1.0, 3.0, 0.0, 2.0, nan, 4.0]</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>...</th>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>669</th>\n",
+       "      <td>CanceledProtocolAmount_max_l12m</td>\n",
+       "      <td>779</td>\n",
+       "      <td>[nan, 4500.0, 30123.7, 1662.75, 20000.0, 25000...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>670</th>\n",
+       "      <td>FulledTotalProtocolAmount_max_l12m</td>\n",
+       "      <td>198</td>\n",
+       "      <td>[nan, 3063.0, 30000.0, 1499.0, 2225.0, 1500.0,...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>671</th>\n",
+       "      <td>LiveProtocolAmount_max_l12m</td>\n",
+       "      <td>317</td>\n",
+       "      <td>[nan, 25642.0, 11937.0, 11481.8, 12500.0, 3003...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>672</th>\n",
+       "      <td>TotalProtocolAmount_max_l12m</td>\n",
+       "      <td>538</td>\n",
+       "      <td>[nan, 30123.7, 834.04, 30000.0, 5851.7, 35000....</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>673</th>\n",
+       "      <td>target</td>\n",
+       "      <td>2</td>\n",
+       "      <td>[0, 1]</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>674 rows × 3 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                               Features  Unique Number  \\\n",
+       "0                           contactcode          45502   \n",
+       "1                               refdate             35   \n",
+       "2                      BusinessUnitCode              5   \n",
+       "3                   AssetManagementCode             95   \n",
+       "4                       ReachStatusCode              5   \n",
+       "..                                  ...            ...   \n",
+       "669     CanceledProtocolAmount_max_l12m            779   \n",
+       "670  FulledTotalProtocolAmount_max_l12m            198   \n",
+       "671         LiveProtocolAmount_max_l12m            317   \n",
+       "672        TotalProtocolAmount_max_l12m            538   \n",
+       "673                              target              2   \n",
+       "\n",
+       "                                                Values  \n",
+       "0    [38433022, 68510340, 9555221, 75038344, 795108...  \n",
+       "1    [2019-06-30, 2019-09-30, 2020-02-29, 2021-06-3...  \n",
+       "2                                 [22, 21, 20, 12, 29]  \n",
+       "3    [23, 5580, 718, 4246, 7205, 6482, 5643, 5688, ...  \n",
+       "4                       [1.0, 3.0, 0.0, 2.0, nan, 4.0]  \n",
+       "..                                                 ...  \n",
+       "669  [nan, 4500.0, 30123.7, 1662.75, 20000.0, 25000...  \n",
+       "670  [nan, 3063.0, 30000.0, 1499.0, 2225.0, 1500.0,...  \n",
+       "671  [nan, 25642.0, 11937.0, 11481.8, 12500.0, 3003...  \n",
+       "672  [nan, 30123.7, 834.04, 30000.0, 5851.7, 35000....  \n",
+       "673                                             [0, 1]  \n",
+       "\n",
+       "[674 rows x 3 columns]"
+      ]
+     },
+     "execution_count": 6,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "#değişkenlerin içeriklerini gösterir:\n",
+    "attFeatures = []\n",
+    "for i in data.columns:\n",
+    "    attFeatures.append([i, data[i].nunique(), data[i].drop_duplicates().values])\n",
+    "pd.DataFrame(attFeatures, columns = ['Features', 'Unique Number', 'Values'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "16:17:14\n",
+      "02_06_2022\n"
+     ]
+    }
+   ],
+   "source": [
+    "from datetime import datetime\n",
+    "\n",
+    "print(datetime.now().strftime(\"%H:%M:%S\"))\n",
+    "print(datetime.today().strftime(\"%d_%m_%Y\"))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#değişkenlerin içeriklerini gösterir:\n",
+    "xxx=pd.DataFrame(attFeatures, columns = ['Features', 'Unique Number', 'Values'])\n",
+    "xxx.to_excel('Ticari_Feature_details_'+str(datetime.today().strftime(\"%Y_%m_%d\"))+'.xlsx')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df1 = data.copy()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df1['IsSalaryDeduction']=np.where(df1['IsSalaryDeduction']=='True',1,np.where(df1['IsSalaryDeduction']=='False',0,-999))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df1['IsTCCitizen']=np.where(df1['IsTCCitizen']=='True',1,np.where(df1['IsTCCitizen']=='False',0,-999))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#df1 = df1.drop(columns=['CityName','Region','BirthPlace'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df1['CityCode'] = df1['CityCode'].astype(int)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "ReachStatusCode                        2102\n",
+       "IncomeStatusCode                      14586\n",
+       "FinancialStatusCode                   14614\n",
+       "AggrementStatusCode                   14665\n",
+       "FirstReachDate_monthdiff              14591\n",
+       "                                      ...  \n",
+       "BrokeProtocolAmount_max_l12m          56314\n",
+       "CanceledProtocolAmount_max_l12m       55398\n",
+       "FulledTotalProtocolAmount_max_l12m    56393\n",
+       "LiveProtocolAmount_max_l12m           56221\n",
+       "TotalProtocolAmount_max_l12m          55795\n",
+       "Length: 589, dtype: int64"
+      ]
+     },
+     "execution_count": 14,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# missing values count:\n",
+    "missing = df1.isnull().sum()\n",
+    "missing = missing[missing>0]\n",
+    "missing"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df1.reset_index(inplace = True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>index</th>\n",
+       "      <th>contactcode</th>\n",
+       "      <th>refdate</th>\n",
+       "      <th>BusinessUnitCode</th>\n",
+       "      <th>AssetManagementCode</th>\n",
+       "      <th>ReachStatusCode</th>\n",
+       "      <th>IncomeStatusCode</th>\n",
+       "      <th>FinancialStatusCode</th>\n",
+       "      <th>AggrementStatusCode</th>\n",
+       "      <th>FirstReachDate_monthdiff</th>\n",
+       "      <th>...</th>\n",
+       "      <th>LiveProtocolCount_max_l12m</th>\n",
+       "      <th>NewProtocolCount_max_l12m</th>\n",
+       "      <th>ProtocolAmount_max_l12m</th>\n",
+       "      <th>ActivatedProtocolAmount_max_l12m</th>\n",
+       "      <th>BrokeProtocolAmount_max_l12m</th>\n",
+       "      <th>CanceledProtocolAmount_max_l12m</th>\n",
+       "      <th>FulledTotalProtocolAmount_max_l12m</th>\n",
+       "      <th>LiveProtocolAmount_max_l12m</th>\n",
+       "      <th>TotalProtocolAmount_max_l12m</th>\n",
+       "      <th>target</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>0</td>\n",
+       "      <td>38433022</td>\n",
+       "      <td>2019-06-30</td>\n",
+       "      <td>22</td>\n",
+       "      <td>23</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>24.0</td>\n",
+       "      <td>19.0</td>\n",
+       "      <td>22.0</td>\n",
+       "      <td>8.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>1</td>\n",
+       "      <td>68510340</td>\n",
+       "      <td>2019-09-30</td>\n",
+       "      <td>22</td>\n",
+       "      <td>23</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>10.0</td>\n",
+       "      <td>13.0</td>\n",
+       "      <td>22.0</td>\n",
+       "      <td>18.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>2</td>\n",
+       "      <td>9555221</td>\n",
+       "      <td>2020-02-29</td>\n",
+       "      <td>21</td>\n",
+       "      <td>23</td>\n",
+       "      <td>3.0</td>\n",
+       "      <td>16.0</td>\n",
+       "      <td>9.0</td>\n",
+       "      <td>22.0</td>\n",
+       "      <td>29.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>3</td>\n",
+       "      <td>75038344</td>\n",
+       "      <td>2021-06-30</td>\n",
+       "      <td>21</td>\n",
+       "      <td>23</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>4</td>\n",
+       "      <td>7951080</td>\n",
+       "      <td>2019-10-31</td>\n",
+       "      <td>22</td>\n",
+       "      <td>23</td>\n",
+       "      <td>3.0</td>\n",
+       "      <td>10.0</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>22.0</td>\n",
+       "      <td>25.0</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>5 rows × 675 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "   index contactcode     refdate  BusinessUnitCode  AssetManagementCode  \\\n",
+       "0      0    38433022  2019-06-30                22                   23   \n",
+       "1      1    68510340  2019-09-30                22                   23   \n",
+       "2      2     9555221  2020-02-29                21                   23   \n",
+       "3      3    75038344  2021-06-30                21                   23   \n",
+       "4      4     7951080  2019-10-31                22                   23   \n",
+       "\n",
+       "   ReachStatusCode  IncomeStatusCode  FinancialStatusCode  \\\n",
+       "0              1.0              24.0                 19.0   \n",
+       "1              1.0              10.0                 13.0   \n",
+       "2              3.0              16.0                  9.0   \n",
+       "3              0.0               NaN                  NaN   \n",
+       "4              3.0              10.0                  1.0   \n",
+       "\n",
+       "   AggrementStatusCode  FirstReachDate_monthdiff  ...  \\\n",
+       "0                 22.0                       8.0  ...   \n",
+       "1                 22.0                      18.0  ...   \n",
+       "2                 22.0                      29.0  ...   \n",
+       "3                  NaN                       NaN  ...   \n",
+       "4                 22.0                      25.0  ...   \n",
+       "\n",
+       "   LiveProtocolCount_max_l12m  NewProtocolCount_max_l12m  \\\n",
+       "0                         NaN                        NaN   \n",
+       "1                         NaN                        NaN   \n",
+       "2                         NaN                        NaN   \n",
+       "3                         NaN                        NaN   \n",
+       "4                         NaN                        NaN   \n",
+       "\n",
+       "   ProtocolAmount_max_l12m  ActivatedProtocolAmount_max_l12m  \\\n",
+       "0                      NaN                               NaN   \n",
+       "1                      NaN                               NaN   \n",
+       "2                      NaN                               NaN   \n",
+       "3                      NaN                               NaN   \n",
+       "4                      NaN                               NaN   \n",
+       "\n",
+       "   BrokeProtocolAmount_max_l12m  CanceledProtocolAmount_max_l12m  \\\n",
+       "0                           NaN                              NaN   \n",
+       "1                           NaN                              NaN   \n",
+       "2                           NaN                              NaN   \n",
+       "3                           NaN                              NaN   \n",
+       "4                           NaN                              NaN   \n",
+       "\n",
+       "  FulledTotalProtocolAmount_max_l12m  LiveProtocolAmount_max_l12m  \\\n",
+       "0                                NaN                          NaN   \n",
+       "1                                NaN                          NaN   \n",
+       "2                                NaN                          NaN   \n",
+       "3                                NaN                          NaN   \n",
+       "4                                NaN                          NaN   \n",
+       "\n",
+       "   TotalProtocolAmount_max_l12m  target  \n",
+       "0                           NaN       0  \n",
+       "1                           NaN       0  \n",
+       "2                           NaN       0  \n",
+       "3                           NaN       1  \n",
+       "4                           NaN       0  \n",
+       "\n",
+       "[5 rows x 675 columns]"
+      ]
+     },
+     "execution_count": 16,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "df1.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 17,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#manuel kolon silme:\n",
+    "df1 = df1.drop(columns=['contacttype_seg'])\n",
+    "df1 = df1.drop(columns=['ContactTypeName'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 18,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#dften target silme, y=target oluşturma:\n",
+    "X_new = df1.drop(['target'],axis=1)\n",
+    "y_new = df1['target']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 19,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#min date ile oot ayırma:\n",
+    "#ardından train-test ayrılır:\n",
+    "min_date = '2021-01-01'\n",
+    "oot_index = X_new.loc[X_new['refdate'] >= min_date].index.values\n",
+    "dev_index = X_new.loc[X_new['refdate'] < min_date].index.values  \n",
+    "\n",
+    "X_new = X_new.drop(columns=['refdate'])\n",
+    "\n",
+    "X_dev = X_new.iloc[dev_index]\n",
+    "y_dev = y_new.iloc[dev_index]\n",
+    "oot_x = X_new.iloc[oot_index]\n",
+    "oot_y = y_new.iloc[oot_index]\n",
+    "\n",
+    "train_x, test_x, train_y, test_y = train_test_split(X_dev, y_dev, test_size=0.2, random_state=10)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 20,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "train_x_new = train_x.copy()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 21,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#tek değerli değişken silme:\n",
+    "dc = drop_constant(train_x_new)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 22,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0\n",
+      "250\n",
+      "500\n"
+     ]
+    }
+   ],
+   "source": [
+    "#aynı tutulan kolonları tekilleştirme:\n",
+    "ddc = drop_duplicate_columns(train_x_new,  dummy_columns_prefix='DMY_') "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 23,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "['contactcode']"
+      ]
+     },
+     "execution_count": 23,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "#data tipi obje olanları listeleme:\n",
+    "k=[]\n",
+    "for i in train_x_new.columns: \n",
+    "    if(train_x_new[i].dtype == object):\n",
+    "        k.append(i)\n",
+    "k"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 24,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#objeler string -999 ile, numerikler sayı -999 ile doldurulur:\n",
+    "for i in range(len(k)):\n",
+    "    train_x_new[k[i]].fillna('-999',inplace=True)\n",
+    "    train_x_new[k[i]]=train_x_new[k[i]].replace([np.nan],'-999')\n",
+    "    train_x_new[k[i]]=train_x_new[k[i]].replace([np.inf,-np.inf],'-999')\n",
+    "    train_x_new[k[i]]=train_x_new[k[i]].replace([np.inf,-np.inf],'-999')\n",
+    "    train_x_new[k[i]]=train_x_new[k[i]].astype(str)\n",
+    "\n",
+    "train_x_new.fillna(-999,inplace=True)\n",
+    "train_x_new=train_x_new.replace([np.nan],-999)\n",
+    "train_x_new=train_x_new.replace([np.inf,-np.inf],-999)\n",
+    "train_x_new=train_x_new.replace([np.inf,-np.inf],-999)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 25,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "['contactcode']"
+      ]
+     },
+     "execution_count": 25,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "#test datası aynı işlemler:\n",
+    "#data tipi obje olanları listeleme:\n",
+    "k=[]\n",
+    "for i in test_x.columns: \n",
+    "    if(test_x[i].dtype == object):\n",
+    "        k.append(i)\n",
+    "k"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 26,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "C:\\ProgramData\\Anaconda3\\lib\\site-packages\\pandas\\core\\generic.py:6392: SettingWithCopyWarning: \n",
+      "A value is trying to be set on a copy of a slice from a DataFrame\n",
+      "\n",
+      "See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy\n",
+      "  return self._update_inplace(result)\n",
+      "C:\\Users\\P-CEMR~1.KAS\\AppData\\Local\\Temp/ipykernel_10392/3853210864.py:5: SettingWithCopyWarning: \n",
+      "A value is trying to be set on a copy of a slice from a DataFrame.\n",
+      "Try using .loc[row_indexer,col_indexer] = value instead\n",
+      "\n",
+      "See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy\n",
+      "  test_x[k[i]]=test_x[k[i]].replace([np.nan],'-999')\n",
+      "C:\\Users\\P-CEMR~1.KAS\\AppData\\Local\\Temp/ipykernel_10392/3853210864.py:6: SettingWithCopyWarning: \n",
+      "A value is trying to be set on a copy of a slice from a DataFrame.\n",
+      "Try using .loc[row_indexer,col_indexer] = value instead\n",
+      "\n",
+      "See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy\n",
+      "  test_x[k[i]]=test_x[k[i]].replace([np.inf,-np.inf],'-999')\n",
+      "C:\\Users\\P-CEMR~1.KAS\\AppData\\Local\\Temp/ipykernel_10392/3853210864.py:7: SettingWithCopyWarning: \n",
+      "A value is trying to be set on a copy of a slice from a DataFrame.\n",
+      "Try using .loc[row_indexer,col_indexer] = value instead\n",
+      "\n",
+      "See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy\n",
+      "  test_x[k[i]]=test_x[k[i]].replace([np.inf,-np.inf],'-999')\n",
+      "C:\\Users\\P-CEMR~1.KAS\\AppData\\Local\\Temp/ipykernel_10392/3853210864.py:8: SettingWithCopyWarning: \n",
+      "A value is trying to be set on a copy of a slice from a DataFrame.\n",
+      "Try using .loc[row_indexer,col_indexer] = value instead\n",
+      "\n",
+      "See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy\n",
+      "  test_x[k[i]]=test_x[k[i]].astype(str)\n",
+      "C:\\ProgramData\\Anaconda3\\lib\\site-packages\\pandas\\core\\frame.py:5176: SettingWithCopyWarning: \n",
+      "A value is trying to be set on a copy of a slice from a DataFrame\n",
+      "\n",
+      "See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy\n",
+      "  return super().fillna(\n",
+      "C:\\Users\\P-CEMR~1.KAS\\AppData\\Local\\Temp/ipykernel_10392/3853210864.py:18: SettingWithCopyWarning: \n",
+      "A value is trying to be set on a copy of a slice from a DataFrame.\n",
+      "Try using .loc[row_indexer,col_indexer] = value instead\n",
+      "\n",
+      "See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy\n",
+      "  oot_x[k[i]]=oot_x[k[i]].replace([np.nan],'-999')\n",
+      "C:\\Users\\P-CEMR~1.KAS\\AppData\\Local\\Temp/ipykernel_10392/3853210864.py:19: SettingWithCopyWarning: \n",
+      "A value is trying to be set on a copy of a slice from a DataFrame.\n",
+      "Try using .loc[row_indexer,col_indexer] = value instead\n",
+      "\n",
+      "See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy\n",
+      "  oot_x[k[i]]=oot_x[k[i]].replace([np.inf,-np.inf],'-999')\n",
+      "C:\\Users\\P-CEMR~1.KAS\\AppData\\Local\\Temp/ipykernel_10392/3853210864.py:20: SettingWithCopyWarning: \n",
+      "A value is trying to be set on a copy of a slice from a DataFrame.\n",
+      "Try using .loc[row_indexer,col_indexer] = value instead\n",
+      "\n",
+      "See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy\n",
+      "  oot_x[k[i]]=oot_x[k[i]].replace([np.inf,-np.inf],'-999')\n",
+      "C:\\Users\\P-CEMR~1.KAS\\AppData\\Local\\Temp/ipykernel_10392/3853210864.py:21: SettingWithCopyWarning: \n",
+      "A value is trying to be set on a copy of a slice from a DataFrame.\n",
+      "Try using .loc[row_indexer,col_indexer] = value instead\n",
+      "\n",
+      "See the caveats in the documentation: https://pandas.pydata.org/pandas-docs/stable/user_guide/indexing.html#returning-a-view-versus-a-copy\n",
+      "  oot_x[k[i]]=oot_x[k[i]].astype(str)\n"
+     ]
+    }
+   ],
+   "source": [
+    "#test datası aynı işlemler:\n",
+    "#objeler string 9999 ile, numerikler sayı 9999 ile doldurulur:\n",
+    "for i in range(len(k)):\n",
+    "    test_x[k[i]].fillna('-999',inplace=True)\n",
+    "    test_x[k[i]]=test_x[k[i]].replace([np.nan],'-999')\n",
+    "    test_x[k[i]]=test_x[k[i]].replace([np.inf,-np.inf],'-999')\n",
+    "    test_x[k[i]]=test_x[k[i]].replace([np.inf,-np.inf],'-999')\n",
+    "    test_x[k[i]]=test_x[k[i]].astype(str)\n",
+    "\n",
+    "test_x.fillna(-999,inplace=True)\n",
+    "test_x=test_x.replace([np.nan],-999)\n",
+    "test_x=test_x.replace([np.inf,-np.inf],-999)\n",
+    "test_x=test_x.replace([np.inf,-np.inf],-999)\n",
+    "\n",
+    "#oot için aynı işlemler:\n",
+    "for i in range(len(k)):\n",
+    "    oot_x[k[i]].fillna('-999',inplace=True)\n",
+    "    oot_x[k[i]]=oot_x[k[i]].replace([np.nan],'-999')\n",
+    "    oot_x[k[i]]=oot_x[k[i]].replace([np.inf,-np.inf],'-999')\n",
+    "    oot_x[k[i]]=oot_x[k[i]].replace([np.inf,-np.inf],'-999')\n",
+    "    oot_x[k[i]]=oot_x[k[i]].astype(str)\n",
+    "\n",
+    "oot_x.fillna(-999,inplace=True)\n",
+    "oot_x=oot_x.replace([np.nan],-999)\n",
+    "oot_x=oot_x.replace([np.inf,-np.inf],-999)\n",
+    "oot_x=oot_x.replace([np.inf,-np.inf],-999)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 27,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "start time:  16:17:40\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"start time: \",datetime.now().strftime(\"%H:%M:%S\"))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 28,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Feature Collinearity Elimination Progress: 60 / 61"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "Index(['index', 'contactcode', 'BusinessUnitCode', 'AssetManagementCode',\n",
+       "       'ReachStatusCode', 'FinancialStatusCode', 'FirstReachDate_monthdiff',\n",
+       "       'FollowingStartDate_monthdiff', 'Sensibility', 'IsTCCitizen',\n",
+       "       ...\n",
+       "       'LiveProtocolCount_max_l6m', 'FulledTotalProtocolAmount_max_l6m',\n",
+       "       'TotalProtocolAmount_max_l6m', 'BrokeProtocolAmount_min_l12m',\n",
+       "       'TotalProtocolAmount_min_l12m', 'ProtocolAmount_avg_l12m',\n",
+       "       'CanceledProtocolAmount_avg_l12m', 'LiveProtocolCount_max_l12m',\n",
+       "       'ActivatedProtocolAmount_max_l12m', 'LiveProtocolAmount_max_l12m'],\n",
+       "      dtype='object', length=121)"
+      ]
+     },
+     "execution_count": 28,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "#corr elemesi:\n",
+    "\n",
+    "elc = eliminate_group_correlation(train_x_new, train_y, corrmat=None, threshold=0.8, seed=100) #136\n",
+    "train_x_new.drop(elc, axis=1, inplace=True)\n",
+    "train_x_new.columns"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 29,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "end time:  16:34:52\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"end time: \",datetime.now().strftime(\"%H:%M:%S\"))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 30,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "pd.DataFrame(train_x_new.columns).to_excel('ticari_model_variables_'+str(datetime.today().strftime(\"%Y_%m_%d\"))+'.xlsx')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 31,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>Unnamed: 0</th>\n",
+       "      <th>0</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>0</td>\n",
+       "      <td>index</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>1</td>\n",
+       "      <td>contactcode</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>2</td>\n",
+       "      <td>BusinessUnitCode</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>3</td>\n",
+       "      <td>AssetManagementCode</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>4</td>\n",
+       "      <td>ReachStatusCode</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>...</th>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>116</th>\n",
+       "      <td>116</td>\n",
+       "      <td>ProtocolAmount_avg_l12m</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>117</th>\n",
+       "      <td>117</td>\n",
+       "      <td>CanceledProtocolAmount_avg_l12m</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>118</th>\n",
+       "      <td>118</td>\n",
+       "      <td>LiveProtocolCount_max_l12m</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>119</th>\n",
+       "      <td>119</td>\n",
+       "      <td>ActivatedProtocolAmount_max_l12m</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>120</th>\n",
+       "      <td>120</td>\n",
+       "      <td>LiveProtocolAmount_max_l12m</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>121 rows × 2 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "     Unnamed: 0                                 0\n",
+       "0             0                             index\n",
+       "1             1                       contactcode\n",
+       "2             2                  BusinessUnitCode\n",
+       "3             3               AssetManagementCode\n",
+       "4             4                   ReachStatusCode\n",
+       "..          ...                               ...\n",
+       "116         116           ProtocolAmount_avg_l12m\n",
+       "117         117   CanceledProtocolAmount_avg_l12m\n",
+       "118         118        LiveProtocolCount_max_l12m\n",
+       "119         119  ActivatedProtocolAmount_max_l12m\n",
+       "120         120       LiveProtocolAmount_max_l12m\n",
+       "\n",
+       "[121 rows x 2 columns]"
+      ]
+     },
+     "execution_count": 31,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "model_vars=pd.read_excel('ticari_model_variables_'+str(datetime.today().strftime(\"%Y_%m_%d\"))+'.xlsx')\n",
+    "model_vars"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 32,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>index</th>\n",
+       "      <th>contactcode</th>\n",
+       "      <th>BusinessUnitCode</th>\n",
+       "      <th>AssetManagementCode</th>\n",
+       "      <th>ReachStatusCode</th>\n",
+       "      <th>FinancialStatusCode</th>\n",
+       "      <th>FirstReachDate_monthdiff</th>\n",
+       "      <th>FollowingStartDate_monthdiff</th>\n",
+       "      <th>Sensibility</th>\n",
+       "      <th>IsTCCitizen</th>\n",
+       "      <th>...</th>\n",
+       "      <th>LiveProtocolCount_max_l6m</th>\n",
+       "      <th>FulledTotalProtocolAmount_max_l6m</th>\n",
+       "      <th>TotalProtocolAmount_max_l6m</th>\n",
+       "      <th>BrokeProtocolAmount_min_l12m</th>\n",
+       "      <th>TotalProtocolAmount_min_l12m</th>\n",
+       "      <th>ProtocolAmount_avg_l12m</th>\n",
+       "      <th>CanceledProtocolAmount_avg_l12m</th>\n",
+       "      <th>LiveProtocolCount_max_l12m</th>\n",
+       "      <th>ActivatedProtocolAmount_max_l12m</th>\n",
+       "      <th>LiveProtocolAmount_max_l12m</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>17020</th>\n",
+       "      <td>17020</td>\n",
+       "      <td>14583529</td>\n",
+       "      <td>22</td>\n",
+       "      <td>23</td>\n",
+       "      <td>3.0</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>34.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>-999</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>37465</th>\n",
+       "      <td>37465</td>\n",
+       "      <td>11398561</td>\n",
+       "      <td>21</td>\n",
+       "      <td>23</td>\n",
+       "      <td>3.0</td>\n",
+       "      <td>19.0</td>\n",
+       "      <td>12.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>-999</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>44875</th>\n",
+       "      <td>44875</td>\n",
+       "      <td>64813000</td>\n",
+       "      <td>21</td>\n",
+       "      <td>5580</td>\n",
+       "      <td>2.0</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>67.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>-999</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>10118</th>\n",
+       "      <td>10118</td>\n",
+       "      <td>2204640</td>\n",
+       "      <td>20</td>\n",
+       "      <td>23</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>-999</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>43731</th>\n",
+       "      <td>43731</td>\n",
+       "      <td>373253</td>\n",
+       "      <td>22</td>\n",
+       "      <td>23</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>19.0</td>\n",
+       "      <td>104.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>-999</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>5 rows × 121 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "       index contactcode  BusinessUnitCode  AssetManagementCode  \\\n",
+       "17020  17020    14583529                22                   23   \n",
+       "37465  37465    11398561                21                   23   \n",
+       "44875  44875    64813000                21                 5580   \n",
+       "10118  10118     2204640                20                   23   \n",
+       "43731  43731      373253                22                   23   \n",
+       "\n",
+       "       ReachStatusCode  FinancialStatusCode  FirstReachDate_monthdiff  \\\n",
+       "17020              3.0                  1.0                      34.0   \n",
+       "37465              3.0                 19.0                      12.0   \n",
+       "44875              2.0                  1.0                      67.0   \n",
+       "10118              1.0                  NaN                       NaN   \n",
+       "43731              0.0                 19.0                     104.0   \n",
+       "\n",
+       "       FollowingStartDate_monthdiff  Sensibility  IsTCCitizen  ...  \\\n",
+       "17020                           NaN          0.0         -999  ...   \n",
+       "37465                           NaN          0.0         -999  ...   \n",
+       "44875                           NaN          0.0         -999  ...   \n",
+       "10118                           NaN          0.0         -999  ...   \n",
+       "43731                           NaN          0.0         -999  ...   \n",
+       "\n",
+       "       LiveProtocolCount_max_l6m  FulledTotalProtocolAmount_max_l6m  \\\n",
+       "17020                        NaN                                NaN   \n",
+       "37465                        NaN                                NaN   \n",
+       "44875                        NaN                                NaN   \n",
+       "10118                        NaN                                NaN   \n",
+       "43731                        NaN                                NaN   \n",
+       "\n",
+       "       TotalProtocolAmount_max_l6m  BrokeProtocolAmount_min_l12m  \\\n",
+       "17020                          NaN                           NaN   \n",
+       "37465                          NaN                           NaN   \n",
+       "44875                          NaN                           NaN   \n",
+       "10118                          NaN                           NaN   \n",
+       "43731                          NaN                           NaN   \n",
+       "\n",
+       "       TotalProtocolAmount_min_l12m  ProtocolAmount_avg_l12m  \\\n",
+       "17020                           NaN                      NaN   \n",
+       "37465                           NaN                      NaN   \n",
+       "44875                           NaN                      NaN   \n",
+       "10118                           NaN                      NaN   \n",
+       "43731                           NaN                      NaN   \n",
+       "\n",
+       "       CanceledProtocolAmount_avg_l12m  LiveProtocolCount_max_l12m  \\\n",
+       "17020                              NaN                         NaN   \n",
+       "37465                              NaN                         NaN   \n",
+       "44875                              NaN                         NaN   \n",
+       "10118                              NaN                         NaN   \n",
+       "43731                              NaN                         NaN   \n",
+       "\n",
+       "       ActivatedProtocolAmount_max_l12m  LiveProtocolAmount_max_l12m  \n",
+       "17020                               NaN                          NaN  \n",
+       "37465                               NaN                          NaN  \n",
+       "44875                               NaN                          NaN  \n",
+       "10118                               NaN                          NaN  \n",
+       "43731                               NaN                          NaN  \n",
+       "\n",
+       "[5 rows x 121 columns]"
+      ]
+     },
+     "execution_count": 32,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "train_x=train_x[model_vars[0]]\n",
+    "train_x.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 33,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>index</th>\n",
+       "      <th>contactcode</th>\n",
+       "      <th>BusinessUnitCode</th>\n",
+       "      <th>AssetManagementCode</th>\n",
+       "      <th>ReachStatusCode</th>\n",
+       "      <th>FinancialStatusCode</th>\n",
+       "      <th>FirstReachDate_monthdiff</th>\n",
+       "      <th>FollowingStartDate_monthdiff</th>\n",
+       "      <th>Sensibility</th>\n",
+       "      <th>IsTCCitizen</th>\n",
+       "      <th>...</th>\n",
+       "      <th>LiveProtocolCount_max_l6m</th>\n",
+       "      <th>FulledTotalProtocolAmount_max_l6m</th>\n",
+       "      <th>TotalProtocolAmount_max_l6m</th>\n",
+       "      <th>BrokeProtocolAmount_min_l12m</th>\n",
+       "      <th>TotalProtocolAmount_min_l12m</th>\n",
+       "      <th>ProtocolAmount_avg_l12m</th>\n",
+       "      <th>CanceledProtocolAmount_avg_l12m</th>\n",
+       "      <th>LiveProtocolCount_max_l12m</th>\n",
+       "      <th>ActivatedProtocolAmount_max_l12m</th>\n",
+       "      <th>LiveProtocolAmount_max_l12m</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>17020</th>\n",
+       "      <td>17020</td>\n",
+       "      <td>14583529</td>\n",
+       "      <td>22</td>\n",
+       "      <td>23</td>\n",
+       "      <td>3.0</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>34.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>-999</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>37465</th>\n",
+       "      <td>37465</td>\n",
+       "      <td>11398561</td>\n",
+       "      <td>21</td>\n",
+       "      <td>23</td>\n",
+       "      <td>3.0</td>\n",
+       "      <td>19.0</td>\n",
+       "      <td>12.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>-999</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>44875</th>\n",
+       "      <td>44875</td>\n",
+       "      <td>64813000</td>\n",
+       "      <td>21</td>\n",
+       "      <td>5580</td>\n",
+       "      <td>2.0</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>67.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>-999</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>10118</th>\n",
+       "      <td>10118</td>\n",
+       "      <td>2204640</td>\n",
+       "      <td>20</td>\n",
+       "      <td>23</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>-999</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>43731</th>\n",
+       "      <td>43731</td>\n",
+       "      <td>373253</td>\n",
+       "      <td>22</td>\n",
+       "      <td>23</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>19.0</td>\n",
+       "      <td>104.0</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>-999</td>\n",
+       "      <td>...</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "      <td>NaN</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>5 rows × 121 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "       index contactcode  BusinessUnitCode  AssetManagementCode  \\\n",
+       "17020  17020    14583529                22                   23   \n",
+       "37465  37465    11398561                21                   23   \n",
+       "44875  44875    64813000                21                 5580   \n",
+       "10118  10118     2204640                20                   23   \n",
+       "43731  43731      373253                22                   23   \n",
+       "\n",
+       "       ReachStatusCode  FinancialStatusCode  FirstReachDate_monthdiff  \\\n",
+       "17020              3.0                  1.0                      34.0   \n",
+       "37465              3.0                 19.0                      12.0   \n",
+       "44875              2.0                  1.0                      67.0   \n",
+       "10118              1.0                  NaN                       NaN   \n",
+       "43731              0.0                 19.0                     104.0   \n",
+       "\n",
+       "       FollowingStartDate_monthdiff  Sensibility  IsTCCitizen  ...  \\\n",
+       "17020                           NaN          0.0         -999  ...   \n",
+       "37465                           NaN          0.0         -999  ...   \n",
+       "44875                           NaN          0.0         -999  ...   \n",
+       "10118                           NaN          0.0         -999  ...   \n",
+       "43731                           NaN          0.0         -999  ...   \n",
+       "\n",
+       "       LiveProtocolCount_max_l6m  FulledTotalProtocolAmount_max_l6m  \\\n",
+       "17020                        NaN                                NaN   \n",
+       "37465                        NaN                                NaN   \n",
+       "44875                        NaN                                NaN   \n",
+       "10118                        NaN                                NaN   \n",
+       "43731                        NaN                                NaN   \n",
+       "\n",
+       "       TotalProtocolAmount_max_l6m  BrokeProtocolAmount_min_l12m  \\\n",
+       "17020                          NaN                           NaN   \n",
+       "37465                          NaN                           NaN   \n",
+       "44875                          NaN                           NaN   \n",
+       "10118                          NaN                           NaN   \n",
+       "43731                          NaN                           NaN   \n",
+       "\n",
+       "       TotalProtocolAmount_min_l12m  ProtocolAmount_avg_l12m  \\\n",
+       "17020                           NaN                      NaN   \n",
+       "37465                           NaN                      NaN   \n",
+       "44875                           NaN                      NaN   \n",
+       "10118                           NaN                      NaN   \n",
+       "43731                           NaN                      NaN   \n",
+       "\n",
+       "       CanceledProtocolAmount_avg_l12m  LiveProtocolCount_max_l12m  \\\n",
+       "17020                              NaN                         NaN   \n",
+       "37465                              NaN                         NaN   \n",
+       "44875                              NaN                         NaN   \n",
+       "10118                              NaN                         NaN   \n",
+       "43731                              NaN                         NaN   \n",
+       "\n",
+       "       ActivatedProtocolAmount_max_l12m  LiveProtocolAmount_max_l12m  \n",
+       "17020                               NaN                          NaN  \n",
+       "37465                               NaN                          NaN  \n",
+       "44875                               NaN                          NaN  \n",
+       "10118                               NaN                          NaN  \n",
+       "43731                               NaN                          NaN  \n",
+       "\n",
+       "[5 rows x 121 columns]"
+      ]
+     },
+     "execution_count": 33,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "train_x.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 34,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>Features</th>\n",
+       "      <th>Unique Number</th>\n",
+       "      <th>Values</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>index</td>\n",
+       "      <td>35629</td>\n",
+       "      <td>[17020, 37465, 44875, 10118, 43731, 1049, 1627...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>contactcode</td>\n",
+       "      <td>31279</td>\n",
+       "      <td>[14583529, 11398561, 64813000, 2204640, 373253...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>BusinessUnitCode</td>\n",
+       "      <td>5</td>\n",
+       "      <td>[22, 21, 20, 12, 29]</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>AssetManagementCode</td>\n",
+       "      <td>64</td>\n",
+       "      <td>[23, 5580, 5643, 718, 5688, 5776, 4899, 2035, ...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>ReachStatusCode</td>\n",
+       "      <td>5</td>\n",
+       "      <td>[3.0, 2.0, 1.0, 0.0, 4.0, nan]</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>...</th>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>116</th>\n",
+       "      <td>ProtocolAmount_avg_l12m</td>\n",
+       "      <td>899</td>\n",
+       "      <td>[nan, 20000.0, 40000.0, 25000.0, 7500.0, 6499....</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>117</th>\n",
+       "      <td>CanceledProtocolAmount_avg_l12m</td>\n",
+       "      <td>554</td>\n",
+       "      <td>[nan, 20000.0, 7500.0, 750.0, 500.07, 2471.64,...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>118</th>\n",
+       "      <td>LiveProtocolCount_max_l12m</td>\n",
+       "      <td>8</td>\n",
+       "      <td>[nan, 0.0, 4.0, 2.0, 1.0, 3.0, 5.0, 6.0, 9.0]</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>119</th>\n",
+       "      <td>ActivatedProtocolAmount_max_l12m</td>\n",
+       "      <td>72</td>\n",
+       "      <td>[nan, 26475.24, 11510.09, 18051.07, 2274.36, 2...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>120</th>\n",
+       "      <td>LiveProtocolAmount_max_l12m</td>\n",
+       "      <td>200</td>\n",
+       "      <td>[nan, 6499.98, 25642.0, 4999.0, 11499.26, 3500...</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>121 rows × 3 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                             Features  Unique Number  \\\n",
+       "0                               index          35629   \n",
+       "1                         contactcode          31279   \n",
+       "2                    BusinessUnitCode              5   \n",
+       "3                 AssetManagementCode             64   \n",
+       "4                     ReachStatusCode              5   \n",
+       "..                                ...            ...   \n",
+       "116           ProtocolAmount_avg_l12m            899   \n",
+       "117   CanceledProtocolAmount_avg_l12m            554   \n",
+       "118        LiveProtocolCount_max_l12m              8   \n",
+       "119  ActivatedProtocolAmount_max_l12m             72   \n",
+       "120       LiveProtocolAmount_max_l12m            200   \n",
+       "\n",
+       "                                                Values  \n",
+       "0    [17020, 37465, 44875, 10118, 43731, 1049, 1627...  \n",
+       "1    [14583529, 11398561, 64813000, 2204640, 373253...  \n",
+       "2                                 [22, 21, 20, 12, 29]  \n",
+       "3    [23, 5580, 5643, 718, 5688, 5776, 4899, 2035, ...  \n",
+       "4                       [3.0, 2.0, 1.0, 0.0, 4.0, nan]  \n",
+       "..                                                 ...  \n",
+       "116  [nan, 20000.0, 40000.0, 25000.0, 7500.0, 6499....  \n",
+       "117  [nan, 20000.0, 7500.0, 750.0, 500.07, 2471.64,...  \n",
+       "118      [nan, 0.0, 4.0, 2.0, 1.0, 3.0, 5.0, 6.0, 9.0]  \n",
+       "119  [nan, 26475.24, 11510.09, 18051.07, 2274.36, 2...  \n",
+       "120  [nan, 6499.98, 25642.0, 4999.0, 11499.26, 3500...  \n",
+       "\n",
+       "[121 rows x 3 columns]"
+      ]
+     },
+     "execution_count": 34,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "#değişkenlerin içeriklerini gösterir:\n",
+    "attFeatures2 = []\n",
+    "for i in train_x.columns:\n",
+    "    attFeatures2.append([i, train_x[i].nunique(), train_x[i].drop_duplicates().values])\n",
+    "pd.DataFrame(attFeatures2, columns = ['Features', 'Unique Number', 'Values'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 35,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "pd.DataFrame(attFeatures2).to_excel('Ticari_train_col_Details_'+str(datetime.today().strftime(\"%Y_%m_%d\"))+'.xlsx')"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# aşağısı silinecek:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#alttaki iki kolon için refdateten fark hesaplanacak\n",
+    "\n",
+    "\n",
+    "#import datetime\n",
+    "#date1=data['RefDate'][0]\n",
+    "#date2=str(data['min_acqdate_ever'][0])\n",
+    "#mdate1 = datetime.datetime.strptime(date1, \"%Y-%m-%d\").date()\n",
+    "#rdate1 = datetime.datetime.strptime(date2, \"%Y-%m-%d\").date()\n",
+    "#delta =  (mdate1 - rdate1).days\n",
+    "#print (delta)\n",
+    "#train_x['min_acqdate_ever']\n",
+    "#train_x['min_acqdate_open']\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#elenecek değişkenleri listeler\n",
+    "elimination_list = dc+ddc+elc\n",
+    "elimination_list=pd.DataFrame(elimination_list)\n",
+    "elimination_list['elimination'] = ''\n",
+    "elimination_list['elimination'][:(len(dc)-1)]='Constant'\n",
+    "elimination_list['elimination'][len(dc):(len(dc)+len(ddc)-1)]='Duplicate'\n",
+    "elimination_list['elimination'][(len(dc)+len(ddc)):]='Correlation'\n",
+    "\n",
+    "#elenen değişkenler raporlanabilir\n",
+    "elimination_list.to_excel('Ticari_elimination_list_'+str(datetime.today().strftime(\"%Y_%m_%d\"))+'.xlsx')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#elenmesi istenmeyen ama elenen değişkenler mauel olarak eklenir:\n",
+    "\n",
+    "#train_x = pd.merge(train_x_new,train_x[['APP_ID',\n",
+    "#'RT_KKB_CC_O_TOT_LIM',\n",
+    "#'RT_KKB_CC_MAX_O_C_LIM_L1Y',\n",
+    "#'RT_CUST_TENURE',\n",
+    "#'RT_CRE_TENURE',\n",
+    "#'RT_EDUCATION',\n",
+    "#'RT_MMZC_TOT_CASH_LIM_LM',\n",
+    "#'RT_KKB_OD_O_MAX_LIM',\n",
+    "#'RT_KKB_O_TOT_CC_AMT',\n",
+    "#'VAR21',\n",
+    "#'RT_KKB_CC_2ND_MAX_O_C_LIM_L1Y',\n",
+    "#'RT_KKB_CC_O_TOT_RISK',\n",
+    "#'RT_KKB_INST_O_TOT_GPL_AMT',\n",
+    "#'RT_KKB_OD_O_TOT_RISK',\n",
+    "#'RT_KKB_SCORE',\n",
+    "#'VAR20',\n",
+    "#'VAR22',\n",
+    "#'VAR23',\n",
+    "#'VAR31',\n",
+    "#'VAR68',\n",
+    "#'VAR95'                                        \n",
+    "#]],on='APP_ID', how='left')\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#id kolonunu silme:\n",
+    "#train_x = train_x.drop(columns=['APP_ID'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#train_x['IsSalaryDeduction']=np.where(train_x['IsSalaryDeduction']=='True',1,np.where(train_x['IsSalaryDeduction']=='False',0,-999))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#train_x['IsTCCitizen']=np.where(train_x['IsTCCitizen']=='True',1,np.where(train_x['IsTCCitizen']=='False',0,-999))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#test_x['IsSalaryDeduction']=np.where(test_x['IsSalaryDeduction']=='True',1,np.where(test_x['IsSalaryDeduction']=='False',0,-999))\n",
+    "#oot_x['IsSalaryDeduction']=np.where(oot_x['IsSalaryDeduction']=='True',1,np.where(oot_x['IsSalaryDeduction']=='False',0,-999))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#test_x['IsTCCitizen']=np.where(test_x['IsTCCitizen']=='True',1,np.where(test_x['IsTCCitizen']=='False',0,-999))\n",
+    "#oot_x['IsTCCitizen']=np.where(oot_x['IsTCCitizen']=='True',1,np.where(oot_x['IsTCCitizen']=='False',0,-999))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#train_x = train_x.drop(columns=['CityName','Region','BirthPlace'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#test_x = test_x.drop(columns=['CityName','Region','BirthPlace'])\n",
+    "#oot_x = oot_x.drop(columns=['CityName','Region','BirthPlace'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#train_x['CityCode'] = train_x['CityCode'].astype(int)\n",
+    "#test_x['CityCode'] = test_x['CityCode'].astype(int)\n",
+    "#oot_x['CityCode'] = oot_x['CityCode'].astype(int)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#eklenen kolonlar olduğu için yeni obje gelenleri listeler:\n",
+    "k=[]\n",
+    "for i in train_x.columns: \n",
+    "    if(train_x[i].dtype == object):\n",
+    "        k.append(i)\n",
+    "k"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#null replacement:\n",
+    "\n",
+    "for i in range(len(k)):\n",
+    "    train_x[k[i]].fillna('-999',inplace=True)\n",
+    "    train_x[k[i]]=train_x[k[i]].replace([np.nan],'-999')\n",
+    "    train_x[k[i]]=train_x[k[i]].replace([np.inf,-np.inf],'-999')\n",
+    "    train_x[k[i]]=train_x[k[i]].replace([np.inf,-np.inf],'-999')\n",
+    "    train_x[k[i]]=train_x[k[i]].astype(str)\n",
+    "\n",
+    "train_x.fillna(-999,inplace=True)\n",
+    "train_x=train_x.replace([np.nan],-999)\n",
+    "train_x=train_x.replace([np.inf,-np.inf],-999)\n",
+    "train_x=train_x.replace([np.inf,-np.inf],-999)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#encoding:\n",
+    "labelEncoder = LabelEncoder()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#obje değişkenler için _L suffix ekler ve label encoding yapar:\n",
+    "for i in range(len(k)):\n",
+    "    train_x[k[i]+'_L'] = labelEncoder.fit_transform(train_x[k[i]])\n",
+    "    \n",
+    "for i in range(len(k)):\n",
+    "    test_x[k[i]+'_L'] = labelEncoder.fit_transform(test_x[k[i]])\n",
+    "    \n",
+    "for i in range(len(k)):\n",
+    "    oot_x[k[i]+'_L'] = labelEncoder.fit_transform(oot_x[k[i]])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#obje kolonları siler:\n",
+    "train_x.drop(k, axis=1, inplace=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "train_x.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#one-hot encoding: \n",
+    "#train_x = pd.get_dummies(train_x, columns=['RT_OCCUPATION','RT_SECTOR_TYPE_DESC','RT_WORKING_TYPE_DESC','RT_EMPLOYMENT_TYPE','RT_CUSTOMER_TYPE' ])    \n",
+    "#test_x = pd.get_dummies(test_x, columns=['RT_OCCUPATION','RT_SECTOR_TYPE_DESC','RT_WORKING_TYPE_DESC','RT_EMPLOYMENT_TYPE','RT_CUSTOMER_TYPE' ]) \n",
+    "#oot_x = pd.get_dummies(oot_x, columns=['RT_OCCUPATION','RT_SECTOR_TYPE_DESC','RT_WORKING_TYPE_DESC','RT_EMPLOYMENT_TYPE','RT_CUSTOMER_TYPE' ]) "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#kolon isimlerini değiştirme:\n",
+    "#train_x.rename(columns={'RT_SECTOR_TYPE_DESC_-9999.0':'RT_SECTOR_TYPE_DESC_9999',\n",
+    "#                        'RT_WORKING_TYPE_DESC_-9999.0':'RT_WORKING_TYPE_DESC_9999'}, inplace = True) \n",
+    "#test_x.rename(columns={'RT_SECTOR_TYPE_DESC_-9999.0':'RT_SECTOR_TYPE_DESC_9999.0',\n",
+    "#                        'RT_WORKING_TYPE_DESC_-9999.0':'RT_WORKING_TYPE_DESC_9999'}, inplace = True) \n",
+    "#oot_x.rename(columns={'RT_SECTOR_TYPE_DESC_-9999.0':'RT_SECTOR_TYPE_DESC_9999.0',\n",
+    "#                        'RT_WORKING_TYPE_DESC_-9999.0':'RT_WORKING_TYPE_DESC_9999'}, inplace = True) "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#kolon isimlerini listeler:\n",
+    "pd.DataFrame(train_x.columns).to_excel('ticari_final_shortlist'+str(datetime.today().strftime(\"%Y_%m_%d\"))+'.xlsx')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "oot_x_new = oot_x[train_x.columns] \n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#test_x[['RT_EMPLOYMENT_TYPE_10.0', 'RT_EMPLOYMENT_TYPE_13.0', \n",
+    "#        'RT_EMPLOYMENT_TYPE_31.0', 'RT_EMPLOYMENT_TYPE_33.0', \n",
+    "#        'RT_EMPLOYMENT_TYPE_34.0', 'RT_EMPLOYMENT_TYPE_35.0', \n",
+    "#        'RT_EMPLOYMENT_TYPE_36.0', 'RT_EMPLOYMENT_TYPE_48.0', \n",
+    "#        'RT_EMPLOYMENT_TYPE_52.0', 'RT_EMPLOYMENT_TYPE_55.0']] = 0"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "test_x_new = test_x[train_x.columns]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "rgs = [sk.ensemble.RandomForestRegressor(n_jobs=-1), sk.ensemble.GradientBoostingRegressor(),\n",
+    "      XGBRegressor()]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "train_y.unique()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "train_x=train_x.drop(columns=['min_acqdate_open','min_acqdate_ever'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#hangi model daha iyi sonuç verir: (metrik:MAE) (cross_val_score'un scoring değiştirilecek)\n",
+    "nfolds = 2\n",
+    "kf = KFold(n_splits=nfolds,random_state=0,shuffle=True)\n",
+    "bestmae = 9999999999\n",
+    "bestrg = \"\"\n",
+    "for rg in rgs:\n",
+    "    mae = (sk.model_selection.cross_val_score(rg,train_x,train_y,cv=kf,n_jobs=-1,scoring='neg_mean_absolute_error').mean())\n",
+    "    print (str(rg) + ' ' + str(mae))\n",
+    "    if  -mae < bestmae:\n",
+    "        bestrg = rg\n",
+    "        bestmae = -mae\n",
+    "        \n",
+    "\n",
+    "print('***********************************************')\n",
+    "print ('Best is... ' + str(bestrg) + ' ' + str(-bestmae) + str(pprint(bestrg.get_params())))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Rkareye göre : hangi model daha iyi sonuç verir: (metrik:MAE) (cross_val_score'un scoring değiştirilecek)\n",
+    "nfolds = 2\n",
+    "kf = KFold(n_splits=nfolds,random_state=0,shuffle=True)\n",
+    "worst_r = -9999999999\n",
+    "bestrg = \"\"\n",
+    "for rg in rgs:\n",
+    "    r_square = (sk.model_selection.cross_val_score(rg,train_x,train_y,cv=kf,n_jobs=-1,scoring='r2').mean())\n",
+    "    print (str(rg) + ' ' + str(mae))\n",
+    "    if  r_square > worst_r:\n",
+    "        bestrg = rg\n",
+    "        bestmae = r_square\n",
+    "        \n",
+    "\n",
+    "print('***********************************************')\n",
+    "print ('Best is... ' + str(bestrg) + ' ' + str(-bestmae) + str(pprint(bestrg.get_params())))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#en iyi modeli fit etme\n",
+    "model=bestrg.fit(train_x,train_y)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#importanceları çıkartır:\n",
+    "sorted(zip((model.feature_importances_)*100,train_x.columns),reverse=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#final modeli fit etme:\n",
+    "#rg = XGBRegressor()\n",
+    "#nfolds = 10\n",
+    "#kf = KFold(n_splits=nfolds,random_state=0,shuffle=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#model_xgb = rg.fit(train_x,train_y)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "model_xgb.get_params()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "mae = (sk.model_selection.cross_val_score(rg,train_x,train_y,cv=kf,n_jobs=-1,scoring='neg_mean_absolute_error').mean())"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from sklearn.model_selection import GridSearchCV"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Create the parameter grid based on the results of random search \n",
+    "param_grid = {\n",
+    "    'bootstrap': [True],\n",
+    "    'max_depth': [5, 10, 30],\n",
+    "    'max_features': ['auto'],\n",
+    "    'min_samples_leaf': [100,200,300,500],\n",
+    "    'min_samples_split': [2 ,4, 8],\n",
+    "    'n_estimators': [100, 200, 300]\n",
+    "}\n",
+    "# Create a based model\n",
+    "rf = RandomForestRegressor()\n",
+    "# Instantiate the grid search model\n",
+    "grid_search = GridSearchCV(estimator = rf, param_grid = param_grid, \n",
+    "                          cv = 3, n_jobs = -1, verbose = 2)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "grid_search.fit(train_x, train_y_new)\n",
+    "grid_search.best_params_"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "grid_search.best_score_"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#değişecek gini:\n",
+    "def evaluate(model, test_features, test_labels):\n",
+    "    predictions = model.predict(test_features)\n",
+    "    errors = abs(predictions - test_labels)\n",
+    "    mape = 100 * np.mean(errors / test_labels)\n",
+    "    accuracy = 100 - mape\n",
+    "    print('Model Performance')\n",
+    "    print('Average Error: {:0.4f} degrees.'.format(np.mean(errors)))\n",
+    "    print('Accuracy = {:0.2f}%.'.format(accuracy))\n",
+    "    \n",
+    "    return accuracy\n",
+    "base_model = RandomForestRegressor(n_estimators = 10, random_state = 42)\n",
+    "base_model.fit(train_x, train_y_new)\n",
+    "base_accuracy = evaluate(base_model, test_x[train_x.columns], test_y_new)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#test\n",
+    "best_grid = grid_search.best_estimator_\n",
+    "grid_accuracy = evaluate(best_grid, test_x[train_x.columns], test_y_new)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#oot"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "grid_accuracy = evaluate(best_grid, oot_x_new, oot_y)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "grid_accuracy = evaluate(best_grid, train_x, train_y_new)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#bundan sonrası yok:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "##TEST"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "test_y_new = test_y['target_w_inf']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "nfolds = 10\n",
+    "kf = KFold(n_splits=nfolds,random_state=0,shuffle=True)\n",
+    "bestmae = 9999999999\n",
+    "bestrg = \"\"\n",
+    "for rg in rgs:\n",
+    "    mae = (sk.model_selection.cross_val_score(rg,test_x,test_y_new,cv=kf,n_jobs=-1,scoring='neg_mean_absolute_error').mean())\n",
+    "    print (str(rg) + ' ' + str(mae))\n",
+    "    if  -mae < bestmae:\n",
+    "        bestrg = rg\n",
+    "        bestmae = -mae\n",
+    "        \n",
+    "\n",
+    "print('***********************************************')\n",
+    "print ('Best is... ' + str(bestrg) + ' ' + str(-bestmae) + 'Parameters currently in use:\\n' + str(pprint(bestrg.get_params())))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "##OOT\n",
+    "nfolds = 10\n",
+    "kf = KFold(n_splits=nfolds,random_state=0,shuffle=True)\n",
+    "bestmae = 9999999999\n",
+    "bestrg = \"\"\n",
+    "for rg in rgs:\n",
+    "    mae = (sk.model_selection.cross_val_score(rg,oot_x_new,oot_y,cv=kf,n_jobs=-1,scoring='neg_mean_absolute_error').mean())\n",
+    "    print (str(rg) + ' ' + str(mae))\n",
+    "    if  -mae < bestmae:\n",
+    "        bestrg = rg\n",
+    "        bestmae = -mae\n",
+    "        \n",
+    "\n",
+    "print('***********************************************')\n",
+    "print ('Best is... ' + str(bestrg) + ' ' + str(-bestmae) + 'Parameters currently in use:\\n' + str(pprint(bestrg.get_params())))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# define dataset\n",
+    "\n",
+    "# create pipeline\n",
+    "rfe = RFE(estimator=RandomForestRegressor(n_jobs=-1), n_features_to_select=100, step=1) ##seçilecek feature adetini revize et(100,75,50)\n",
+    "model = RandomForestRegressor()\n",
+    "pipeline = Pipeline(steps=[('s',rfe),('m',model)])\n",
+    "# evaluate model\n",
+    "cv = RepeatedKFold(n_splits=10, n_repeats=3, random_state=1)\n",
+    "n_scores = cross_val_score(pipeline, train_x, train_y_new, scoring='neg_mean_absolute_error', cv=cv, n_jobs=-1, error_score='raise')\n",
+    "# report performance\n",
+    "print('MAE: %.3f (%.3f)' % (mean(n_scores), std(n_scores)))\n",
+    "\n",
+    "rfe.support_\n",
+    "# summarize all features\n",
+    "#for i in range(train_x.shape[1]):\n",
+    "#print('Column: %d, Selected %s, Rank: %.3f' % (i, rfe.support_[i], rfe.ranking_[i])) ##bunu kontrol et\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# create pipeline\n",
+    "rfe = RFE(estimator=RandomForestRegressor(), n_features_to_select=5)\n",
+    "model = RandomForestRegressor()\n",
+    "pipeline = Pipeline(steps=[('s',rfe),('m',model)])\n",
+    "# evaluate model\n",
+    "cv = RepeatedKFold(n_splits=10, n_repeats=3, random_state=1)\n",
+    "n_scores = cross_val_score(pipeline, train_x, train_y, scoring='neg_mean_absolute_error', cv=cv, n_jobs=-1, error_score='raise')\n",
+    "# report performance\n",
+    "print('MAE: %.3f (%.3f)' % (mean(n_scores), std(n_scores)))"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.9.7"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
